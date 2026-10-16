@@ -1,34 +1,52 @@
-# Orbit Scheduler: operations and security
+# Orbit Scheduler: operations
 
-This guide organizes runtime behavior documented by the package. It does not certify production readiness. Verify provider/client versions, permissions, transport security, limits, and failure behavior in the target environment before release.
+`orbit-scheduler` reads no environment variables and creates no external service connections. The
+application owns the scheduler's construction, startup, and shutdown. Register it once per process
+through the application's managed-resource lifecycle, and decide explicitly whether running a
+copy in every worker is safe.
 
-## Configuration surface
+## Capacity and job design
 
-Environment names found in the package README:
+Choose `max_jobs` and `max_concurrency` from the amount of scheduled work and downstream capacity.
+Each registered job owns a task, while at most `max_concurrency` callbacks run concurrently. Jobs
+that are waiting on the shared semaphore still have tasks, so callbacks should not create large
+unbounded queues of their own.
 
-The package README does not name `ORBIT_*` variables. Use its typed constructors and application configuration, and confirm exact runtime inputs in the implementation before deployment.
+Intervals use fixed-delay semantics. The next run begins one full interval after the callback
+finishes. A long or slow callback shifts future runs and does not create catch-up executions. Use
+this package for periodic best-effort in-process work, not precise wall-clock schedules.
 
-Use the package README's constructor and deployment examples. Store credentials in a secret manager and avoid logging credentials, raw provider errors, request data, or opaque cursors.
+## Lifecycle wiring
 
-## Lifecycle, failure behavior, and limits
+Register callbacks before `start()`. Call `aclose()` from application shutdown and choose a grace
+period that fits the process termination budget. The first concurrent closer determines the shared
+grace period. During shutdown, callbacks may be cancelled after grace expires; make them
+cancellation-cooperative and close database cursors, network streams, and temporary resources in
+`finally` blocks.
 
-`orbit-scheduler` is an optional, provider-neutral in-process scheduler for bounded asynchronous
-interval jobs. It is separate from Orbit Core, whose lifecycle and request timeouts continue to
-govern the application. The package supports Python 3.11 through 3.14 and is pre-alpha.
+If a callback suppresses cancellation, `aclose()` still returns after its bounded wait and the
+scheduler enters `CLOSED`, while the callback task may continue. Do not let such callbacks own
+resources that the rest of application shutdown assumes are already released. Monitor these cases
+and prefer a dedicated worker system for long-running or cancellation-resistant work.
 
-```bash
-python -m pip install orbit-scheduler
-```
+## Failure reporting and observability
 
-## Delivery and deployment limits
+Use `on_error` to send safe `JobFailure` data to application monitoring. It contains the job name,
+sanitized exception class name, and occurrence timestamp, not the exception message or traceback.
+The handler itself should be fast and bounded; an async handler runs inside the job task and delays
+the next interval. A failed handler does not stop the schedule but is logged.
 
-Schedules and run state exist only in this process. A restart loses schedules; multiple workers each
-run their own copy. The package does not provide cron/time-zone rules, persistence, leader election,
-distributed locks, retries, durable delivery, or execution guarantees. Do not use it for work that
-must survive process failure or must run exactly once across workers. Those needs require a separate
-durable scheduler/worker backend and an adapter that defines its delivery and acknowledgement
-semantics.
+Add application metrics for callback duration, last successful run, consecutive failures, active
+callbacks, and shutdown cancellation. This package does not expose a metrics backend or mark jobs
+healthy automatically.
 
-## Production validation
+## Delivery limits
 
-Validate startup/shutdown cleanup, timeout and cancellation behavior, concurrency and payload bounds where applicable, secret rotation and least-privilege access, data durability, backup/restore, and failover against the selected provider. Do not infer distributed or durable guarantees from an in-process API or fake-client tests.
+Schedules are lost on restart and repeated independently in every worker. If duplicate execution is
+unsafe, guard the callback with an application-level idempotency mechanism or use a distributed job
+system. This package supplies no retry, persistence, locking, leader election, or delivery
+acknowledgment.
+
+Before release, exercise process shutdown during success, failure, semaphore wait, and active I/O;
+also verify multi-worker deployment behavior and callbacks' cancellation cleanup. Unit tests cannot
+prove a particular application's callbacks are safe to terminate.

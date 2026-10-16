@@ -1,10 +1,11 @@
 # Orbit Scheduler: development
 
-This package declares support for `>=3.11,<3.15` in `pyproject.toml`. That declaration is distinct from evidence that hosted CI ran.
+The scheduler is a small in-process async component. Keep its task count and shutdown wait
+bounded, and ensure errors and cancellation cannot silently break lifecycle ownership.
 
-Use the checks for each language manifest present in this repository:
+## Local setup and checks
 
-### Python package
+From the repository root:
 
 ```bash
 python -m pip install -e '.[dev]' build
@@ -12,10 +13,26 @@ pytest
 ruff check src tests
 ruff format --check src tests
 mypy
+python -m build
 ```
 
-Optional SDKs and live-service tests are described by the package README. Do not run an opt-in live test against a shared or production service unless its own documentation explicitly supports that use.
+Tests use local coroutines and do not require a broker, database, or external scheduler. They cover
+registration bounds, fixed-delay non-overlap, global concurrency, safe failure records, and
+bounded/cancelled shutdown. They cannot validate arbitrary application callback cleanup or
+multi-process coordination.
 
-## Contribution expectations
+## Implementation guidance
 
-Add focused regression coverage for behavior changes. Update the README and relevant guide when a contract, configuration option, security property, lifecycle rule, or operational assumption changes. Report the exact versions and services exercised; local checks do not imply hosted CI or release validation.
+- Validate names, intervals, capacities, callbacks, and lifecycle state before starting tasks.
+- Preserve one task per bounded registration and do not add a catch-up queue implicitly.
+- Keep callback failure metadata free of exception messages, traceback, callback repr, and other
+  potentially sensitive values. Sanitize any labels sent to logs or monitoring.
+- Keep the first shutdown caller's grace period semantics explicit if shutdown remains shared.
+- Observe tasks that outlive close because they suppressed cancellation; do not leak unhandled task
+  exceptions.
+- Test races among startup, close, callback failure, semaphore admission, and cancellation using
+  events instead of fragile timing assumptions.
+
+Follow the repository contribution guide, governance, code of conduct, and security policy. Update
+API docstrings and operations guidance whenever lifecycle or timing behavior changes. Report local
+checks separately from hosted CI and application deployment validation.

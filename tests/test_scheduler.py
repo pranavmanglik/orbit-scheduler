@@ -176,6 +176,28 @@ async def test_callback_failures_are_redacted_and_do_not_stop_the_job() -> None:
     assert "private-token-value" not in repr(reports[0])
 
 
+async def test_failure_type_is_sanitized_before_reporting() -> None:
+    """An unusual dynamic exception class name cannot inject control characters in logs."""
+    reports: list[JobFailure] = []
+    error_type = type("Private\nException", (Exception,), {})
+
+    async def callback() -> None:
+        raise error_type("sensitive message")
+
+    scheduler = IntervalScheduler(on_error=reports.append)
+    scheduler.add_interval("safe-name", 0.01, callback, run_immediately=True)
+    await scheduler.start()
+    for _ in range(100):
+        if reports:
+            break
+        await asyncio.sleep(0.001)
+    await scheduler.aclose()
+
+    assert len(reports) == 1
+    assert reports[0].error_type == "Private_Exception"
+    assert "\n" not in reports[0].error_type
+
+
 async def test_cancelled_shutdown_waiter_does_not_cancel_cleanup() -> None:
     started = asyncio.Event()
 

@@ -33,6 +33,7 @@ _MAX_JOBS = 10_000
 _MAX_CONCURRENCY = 1_024
 _MAX_SHUTDOWN_GRACE = 300.0
 _CANCEL_SETTLE_GRACE = 0.1
+_SAFE_ERROR_TYPE_CHARACTER = re.compile(r"[A-Za-z0-9_.-]")
 
 JobCallback = Callable[[], Awaitable[None]]
 
@@ -52,7 +53,12 @@ class SchedulerState(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class JobFailure:
-    """Safe scheduled-job failure metadata; the original exception is never retained."""
+    """Safe metadata emitted after one callback failure.
+
+    ``occurred_at`` is a Unix timestamp in seconds from the system wall clock. The original
+    exception, message, traceback, and callback arguments are deliberately not retained, so this
+    record is safe to pass to application monitoring without exposing exception payloads.
+    """
 
     name: str
     error_type: str
@@ -62,9 +68,22 @@ class JobFailure:
 JobErrorHandler = Callable[[JobFailure], None | Awaitable[None]]
 
 
+def _safe_error_type(error: BaseException) -> str:
+    """Return a short ASCII exception class label safe for logs and monitoring records."""
+    name = type(error).__name__
+    safe_name = "".join(
+        character if _SAFE_ERROR_TYPE_CHARACTER.fullmatch(character) else "_" for character in name
+    )[:128]
+    return safe_name or "Exception"
+
+
 @dataclass(frozen=True, slots=True)
 class IntervalJob:
-    """Immutable process-local job configuration."""
+    """Immutable process-local job configuration registered before scheduler startup.
+
+    The interval is fixed delay after a run completes, not a wall-clock cadence. A job cannot
+    overlap with itself, and skipped time is not replayed as catch-up executions.
+    """
 
     name: str
     interval: float
@@ -150,7 +169,9 @@ class IntervalScheduler:
         """Register a named fixed-delay job before startup.
 
         The callback must be an async callable. Intervals are bounded to prevent an accidental
-        zero-delay busy loop or an indefinitely retained schedule.
+        zero-delay busy loop or an indefinitely retained schedule. Names are unique and limited to
+        128 safe ASCII characters. Registrations are in-memory and are not persisted across
+        scheduler instances or process restarts.
         """
         if self._state is not SchedulerState.NEW:
             raise SchedulerError("Jobs can only be added before the scheduler starts.")
@@ -177,7 +198,11 @@ class IntervalScheduler:
         self._jobs[name] = IntervalJob(name, float(interval), callback, run_immediately)
 
     async def start(self) -> None:
-        """Start the configured jobs once; repeated calls while running are harmless."""
+        """Start one background task per configured job.
+
+        Calling ``start`` again while running is harmless. Starting after shutdown begins is an
+        error. An empty scheduler is valid and starts no tasks.
+        """
         async with self._lock:
             if self._state is SchedulerState.RUNNING:
                 return
@@ -192,8 +217,12 @@ class IntervalScheduler:
     async def aclose(self, *, grace_period: float = 5.0) -> None:
         """Stop future runs and bound the wait for in-flight callbacks.
 
-        Concurrent calls share one cleanup task. Cancellation of a caller does not cancel cleanup;
-        the caller still receives ``CancelledError`` while shutdown continues in the background.
+        Concurrent calls share one cleanup task; the grace period from the first caller controls
+        that cleanup. Cancellation of a caller does not cancel cleanup; the caller still receives
+        ``CancelledError`` while shutdown continues in the background. After the grace period,
+        callbacks are cancelled and given a short settling interval. A callback that suppresses
+        cancellation can outlive the scheduler's ``CLOSED`` state; its eventual failure remains
+        observed to avoid an unhandled-task warning.
         """
         if (
             isinstance(grace_period, bool)
@@ -240,7 +269,7 @@ class IntervalScheduler:
             except Exception as exc:
                 failure = JobFailure(
                     name=job.name,
-                    error_type=type(exc).__name__[:128],
+                    error_type=_safe_error_type(exc),
                     occurred_at=time.time(),
                 )
                 await self._report_failure(failure)
@@ -265,7 +294,7 @@ class IntervalScheduler:
             _LOG.error(
                 "Scheduled job error handler failed: name=%s error_type=%s",
                 failure.name,
-                type(exc).__name__[:128],
+                _safe_error_type(exc),
             )
 
     async def _wait(self, delay: float) -> bool:

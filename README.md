@@ -2,7 +2,7 @@
 
 `orbit-scheduler` is an optional, provider-neutral in-process scheduler for bounded asynchronous
 interval jobs. It is separate from Orbit Core, whose lifecycle and request timeouts continue to
-govern the application. The package supports Python 3.11 through 3.14 and is pre-alpha.
+govern the application. The package supports Python 3.11 through 3.14 and is alpha.
 
 ```bash
 python -m pip install orbit-scheduler
@@ -18,8 +18,7 @@ The scheduler also caps total registrations and simultaneous callbacks.
 from orbit_scheduler import IntervalScheduler, JobFailure
 
 
-async def refresh_catalog() -> None:
-    ...
+async def refresh_catalog() -> None: ...
 
 
 def report_failure(failure: JobFailure) -> None:
@@ -29,6 +28,7 @@ def report_failure(failure: JobFailure) -> None:
 
 scheduler = IntervalScheduler(max_jobs=32, max_concurrency=4, on_error=report_failure)
 scheduler.add_interval("catalog-refresh", 60, refresh_catalog, run_immediately=True)
+
 
 async def application_lifespan() -> None:
     await scheduler.start()
